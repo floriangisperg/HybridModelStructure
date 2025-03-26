@@ -147,8 +147,8 @@ class Trainer:
         # Compute loss and gradients
         (loss_value, loss_info), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
 
-        # Update parameters
-        updates, new_opt_state = self.optimizer.update(grads, opt_state)
+        # Update parameters - need to pass params for adamw with weight decay
+        updates, new_opt_state = self.optimizer.update(grads, opt_state, params=params)
         new_params = optax.apply_updates(params, updates)
 
         return new_params, new_opt_state, loss_value, loss_info

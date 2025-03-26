@@ -21,7 +21,8 @@ def create_vector_field(mechanistic_model, parameter_model):
     """
     Create a JAX-compatible vector field function for Diffrax.
 
-    This function is designed to be compatible with JAX's tracing.
+    This creates a generic vector field function that works with any
+    mechanistic model following the standard interface.
 
     Args:
         mechanistic_model: The ODE mechanistic model
@@ -30,21 +31,25 @@ def create_vector_field(mechanistic_model, parameter_model):
     Returns:
         A vector field function
     """
+
     def vector_field(t, y, args):
         # Get inputs from args
-        inputs = args.get('inputs', {}).copy()
+        inputs = dict(args.get('inputs', {}))  # Make a copy using dict constructor
 
-        # Update inputs with current state
-        state_names = getattr(mechanistic_model, 'state_names', ['X', 'P'])
+        # Get state names from the model or generate generic ones
+        state_names = getattr(mechanistic_model, 'state_names',
+                              [f"state_{i}" for i in range(len(y))])
+
+        # Update inputs with current state values
         for i, name in enumerate(state_names):
-            # Use JAX's type conversion
-            inputs[name] = jnp.asarray(y[i], dtype=float)
+            if i < len(y):  # Safety check
+                inputs[name] = y[i]  # Keep as JAX array
 
         # Add time if not present
         if 't' not in inputs:
-            inputs['t'] = jnp.asarray(t, dtype=float)
+            inputs['t'] = t  # Keep as JAX scalar
 
-        # Predict parameters using neural network
+        # Predict parameters using the parameter model
         parameters = parameter_model.predict_parameters(inputs)
 
         # Call mechanistic model's system equations
@@ -76,12 +81,13 @@ class ODENeuralHybridModel(StandardHybridModel):
         self.vector_field_fn = create_vector_field(ode_model, parameter_model)
 
     def solve(self,
-             initial_conditions: Dict[str, float],
-             time_points: np.ndarray,
-             inputs: Dict[str, Any],
-             solver_options: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
+              initial_conditions: Dict[str, float],
+              time_points: np.ndarray,
+              inputs: Dict[str, Any],
+              solver_options: Optional[Dict[str, Any]] = None) -> Dict[str, np.ndarray]:
         """
         Solve the ODE system with neural-predicted parameters.
+        JAX-compatible version.
 
         Args:
             initial_conditions: Initial values for state variables
@@ -98,13 +104,13 @@ class ODENeuralHybridModel(StandardHybridModel):
         # Get state names from mechanistic model
         state_names = getattr(self.mechanistic_model, 'state_names', ['X', 'P'])
 
-        # Create initial state vector from numpy array
-        # Convert to numpy first to avoid JAX tracing issues
-        y0 = np.array([initial_conditions.get(name, 0.0) for name in state_names])
+        # Create initial state vector
+        # Convert to jnp array directly without going through numpy
+        y0 = jnp.array([initial_conditions.get(name, 0.0) for name in state_names])
 
-        # Time range - convert to standard floats for safety
-        t0 = float(time_points[0])
-        t1 = float(time_points[-1])
+        # Time range - convert to JAX values
+        t0 = jnp.asarray(time_points[0])
+        t1 = jnp.asarray(time_points[-1])
 
         # Prepare Diffrax components
         term = ODETerm(self.vector_field_fn)
@@ -112,44 +118,60 @@ class ODENeuralHybridModel(StandardHybridModel):
         saveat = SaveAt(ts=time_points)
 
         # Set up step size controller
-        rtol = solver_options.get('rtol', 1e-3)
-        atol = solver_options.get('atol', 1e-6)
+        rtol = solver_options.get('rtol', 1e-4)  # Tighter tolerance
+        atol = solver_options.get('atol', 1e-7)  # Tighter tolerance
         stepsize_controller = PIDController(rtol=rtol, atol=atol)
 
-        try:
-            # Convert initial conditions to jnp array right before solving
-            jax_y0 = jnp.array(y0)
+        # Use a much higher max_steps value to avoid the maximum steps error
+        max_steps = solver_options.get('max_steps', 1000000)  # Increased from 50000
 
-            # Solve the ODE
+        try:
+            # Solve the ODE - no need to convert y0 again
             sol = diffeqsolve(
                 term,
                 solver,
                 t0=t0,
                 t1=t1,
                 dt0=solver_options.get('dt0', 0.01),
-                y0=jax_y0,
+                y0=y0,
                 args={'inputs': inputs},
                 saveat=saveat,
-                max_steps=solver_options.get('max_steps', 50000),
+                max_steps=max_steps,
                 stepsize_controller=stepsize_controller
             )
 
             # Convert solution to dictionary
             solution = {}
             for i, name in enumerate(state_names):
-                # Convert to numpy array for consistency
-                solution[name] = np.array(sol.ys[:, i])
+                # Keep as JAX array - no conversion to numpy needed
+                solution[name] = sol.ys[:, i]
 
             return solution
 
         except Exception as e:
             # Provide more helpful error information
             error_msg = f"Error solving ODE system: {str(e)}"
+
+            print(f"DEBUG: Error in solve(): {error_msg}")
+            print(f"DEBUG: Initial conditions: {initial_conditions}")
+            print(f"DEBUG: State names: {state_names}")
+            print(f"DEBUG: First few time points: {time_points[:5]}")
+
+            if "maximum number of solver steps was reached" in str(e):
+                error_msg += (
+                    "\nThe ODE solver took too many steps. This often indicates a stiff system or unstable parameters. "
+                    "Try increasing 'max_steps' even further, decreasing the time range, or using a stiff solver.")
+
             if "ConcretizationTypeError" in str(e):
                 error_msg += ("\nThis is likely due to a JAX tracing error. "
-                             "Make sure all operations in your vector field "
-                             "function are JAX-compatible.")
-            raise ValueError(error_msg)
+                              "Make sure all operations in your vector field "
+                              "function are JAX-compatible.")
+
+                # For easier debugging, try printing some information about inputs
+                print("DEBUG: Input keys:", list(inputs.keys()))
+                print("DEBUG: Input types:", {k: type(v) for k, v in inputs.items()})
+
+            raise ValueError(error_msg) from e
 
     def forward(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """

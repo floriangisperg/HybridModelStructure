@@ -191,10 +191,9 @@ class MLPParameterModel(NeuralParameterModel):
                     # Ensure the value is a scalar to avoid shape issues
                     # If it's an array, take the first element (useful during ODE integration)
                     if isinstance(value, (np.ndarray, jnp.ndarray)) and value.size > 1:
-                        value = float(value.reshape(-1)[0])
-                    else:
-                        # Convert to float to ensure consistent types
-                        value = float(value)
+                        # Use JAX-compatible indexing instead of float conversion
+                        value = value.reshape(-1)[0]
+                    # No conversion to float here - keep as JAX array
 
                     # Apply normalization if available
                     if self._normalization and feature in self._normalization:
@@ -207,15 +206,17 @@ class MLPParameterModel(NeuralParameterModel):
                     # Only raise error if default values aren't provided
                     raise ValueError(f"Missing input feature: {feature}")
 
-            # Convert to JAX array - this is where the shape error was happening
-            # Now we ensure all values are scalars, so this should work
+            # Convert to JAX array
             x = jnp.array(feature_values)
 
             # Predict parameter
             pred = network(x)
 
-            # Store parameter value
-            parameters[param_name] = float(pred[0]) if pred.size == 1 else pred
+            # Store parameter value - keep as JAX array
+            if pred.size == 1:
+                parameters[param_name] = pred[0]  # Keep as JAX array
+            else:
+                parameters[param_name] = pred
 
         return parameters
 
