@@ -1,15 +1,18 @@
 """
-Bioprocess mechanistic model implementation.
+Bioprocess-specific model implementations.
 
-This module provides a concrete implementation of an ODE-based bioprocess model
-using the general hybrid modeling framework.
+This module contains mechanistic and hybrid models for bioprocess modeling,
+built on top of the generic hybrid modeling framework.
 """
 
-from typing import Dict, List, Any, Optional, Callable, Union, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from hybrid_modeling.models.mechanistic.ode import DiffraxODEModel
+from hybrid_modeling.models.parameters.neural import MLPParameterModel
+from hybrid_modeling.models.hybrid.ode_neural import ODENeuralHybridModel
 
 
 def get_control_at_time(t: float, times: np.ndarray, values: np.ndarray) -> float:
@@ -204,21 +207,22 @@ class BioprocessModel(DiffraxODEModel):
 
 class BioprocessHybridModel:
     """
-    Factory function to create a bioprocess hybrid model.
+    Factory functions for bioprocess hybrid models.
 
-    This function creates a hybrid model combining a bioprocess mechanistic model
-    with neural networks for predicting growth rate and product formation rate.
+    This class provides methods to create various hybrid bioprocess models
+    by combining the BioprocessModel with different parameter estimation approaches.
     """
 
     @staticmethod
-    def create(norm_params: Dict[str, Dict[str, float]],
-               growth_inputs: List[str],
-               product_inputs: List[str],
-               growth_hidden_dims: List[int] = [16, 16],
-               product_hidden_dims: Optional[List[int]] = None,
-               key=None):
+    def create_neural_hybrid(
+            norm_params: Dict[str, Dict[str, float]],
+            growth_inputs: List[str],
+            product_inputs: List[str],
+            growth_hidden_dims: List[int] = [16, 16],
+            product_hidden_dims: Optional[List[int]] = None,
+            key=None):
         """
-        Create a bioprocess hybrid model.
+        Create a bioprocess hybrid model with neural networks.
 
         Args:
             norm_params: Normalization parameters
@@ -231,11 +235,6 @@ class BioprocessHybridModel:
         Returns:
             A hybrid model for bioprocess modeling
         """
-        from hybrid_modeling.models.mechanistic.bioprocess import BioprocessModel
-        from hybrid_modeling.models.parameters.neural import MLPParameterModel
-        from hybrid_modeling.models.hybrid.ode_neural import ODENeuralHybridModel
-        import jax.random
-
         if key is None:
             key = jax.random.PRNGKey(0)
 
@@ -276,3 +275,46 @@ class BioprocessHybridModel:
         )
 
         return hybrid_model
+
+
+def calculate_custom_loss(model: Any, runs: List[Dict[str, Any]], mechanistic_model: BioprocessModel) -> Tuple[
+    float, Dict[str, float]]:
+    """
+    Calculate custom loss for bioprocess model.
+
+    Args:
+        model: Hybrid model
+        runs: List of run data
+        mechanistic_model: Bioprocess mechanistic model
+
+    Returns:
+        Tuple of (loss_value, loss_info)
+    """
+    total_loss = 0.0
+    total_x_loss = 0.0
+    total_p_loss = 0.0
+
+    # Compute loss for each run
+    for run_data in runs:
+        # Solve ODE for this run
+        sol = mechanistic_model.solve_for_run(model, run_data)
+
+        # Extract predictions and true values
+        X_pred = sol['X_pred']
+        P_pred = sol['P_pred']
+        X_true = sol['X_true']
+        P_true = sol['P_true']
+
+        # Compute MSE loss for X and P
+        X_loss = np.mean(np.square(X_pred - X_true))
+        P_loss = np.mean(np.square(P_pred - P_true))
+
+        # Add to total loss
+        run_loss = X_loss + P_loss
+        total_loss += run_loss
+        total_x_loss += X_loss
+        total_p_loss += P_loss
+
+    # Return average loss
+    n_runs = len(runs)
+    return total_loss / n_runs, {'x_loss': total_x_loss / n_runs, 'p_loss': total_p_loss / n_runs}
