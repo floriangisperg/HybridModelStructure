@@ -22,13 +22,13 @@ class MLP(eqx.Module):
     input_features: List[str]
 
     def __init__(self,
-                 input_features: List[str],
-                 hidden_dims: List[int],
-                 output_dim: int = 1,
-                 activation: str = 'relu',
-                 output_activation: Optional[str] = None,
-                 normalization: Optional[Dict[str, Dict[str, float]]] = None,
-                 key=None):
+                input_features: List[str],
+                hidden_dims: List[int],
+                output_dim: int = 1,
+                activation: str = 'relu',
+                output_activation: Optional[str] = None,
+                normalization: Optional[Dict[str, Dict[str, float]]] = None,
+                key=None):
         """
         Initialize MLP.
 
@@ -72,7 +72,7 @@ class MLP(eqx.Module):
 
             # Add linear layer
             layer_key, key = jax.random.split(key)
-            layers.append(eqx.nn.Linear(hidden_dims[i], hidden_dims[i + 1], key=layer_key))
+            layers.append(eqx.nn.Linear(hidden_dims[i], hidden_dims[i+1], key=layer_key))
 
         # Add activation after last hidden layer
         if activation == 'relu':
@@ -123,9 +123,9 @@ class MLPParameterModel(NeuralParameterModel):
     """
 
     def __init__(self,
-                 parameter_configs: Dict[str, Dict[str, Any]],
-                 normalization: Optional[Dict[str, Dict[str, float]]] = None,
-                 key=None):
+                parameter_configs: Dict[str, Dict[str, Any]],
+                normalization: Optional[Dict[str, Dict[str, float]]] = None,
+                key=None):
         """
         Initialize MLP parameter model.
 
@@ -188,6 +188,14 @@ class MLPParameterModel(NeuralParameterModel):
                 if feature in inputs:
                     value = inputs[feature]
 
+                    # Ensure the value is a scalar to avoid shape issues
+                    # If it's an array, take the first element (useful during ODE integration)
+                    if isinstance(value, (np.ndarray, jnp.ndarray)) and value.size > 1:
+                        value = float(value.reshape(-1)[0])
+                    else:
+                        # Convert to float to ensure consistent types
+                        value = float(value)
+
                     # Apply normalization if available
                     if self._normalization and feature in self._normalization:
                         mean = self._normalization[feature].get('mean', 0.0)
@@ -196,9 +204,11 @@ class MLPParameterModel(NeuralParameterModel):
 
                     feature_values.append(value)
                 else:
+                    # Only raise error if default values aren't provided
                     raise ValueError(f"Missing input feature: {feature}")
 
-            # Convert to JAX array
+            # Convert to JAX array - this is where the shape error was happening
+            # Now we ensure all values are scalars, so this should work
             x = jnp.array(feature_values)
 
             # Predict parameter

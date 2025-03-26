@@ -6,8 +6,8 @@ These interfaces are domain-agnostic and can be implemented for different types 
 """
 
 import abc
-from typing import Dict, List, Any, Optional, Sequence, Union, Tuple
 import numpy as np
+from typing import Dict, List, Any, Optional, Sequence, Union, Tuple
 
 
 class DataPoint(abc.ABC):
@@ -113,7 +113,7 @@ class ExperimentRun(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def data(self) -> Dataset:
+    def data(self) -> Any:
         """Get the dataset for this run."""
         pass
 

@@ -8,7 +8,7 @@ without assumptions about specific column names or data structures.
 import os
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple, Union, Callable
 
 from hybrid_modeling.core.data import DataLoader, ExperimentDataset, ExperimentRun
 
@@ -17,13 +17,13 @@ class GenericExcelRun(ExperimentRun):
     """A single experiment run from an Excel file."""
 
     def __init__(self,
-                 run_id: str,
-                 data: pd.DataFrame,
-                 time_col: str,
-                 state_cols: List[str],
-                 control_cols: List[str],
-                 initial_conditions: Optional[Dict[str, float]] = None,
-                 metadata: Optional[Dict[str, Any]] = None):
+                run_id: str,
+                data: pd.DataFrame,
+                time_col: str,
+                state_cols: List[str],
+                control_cols: List[str],
+                initial_conditions: Optional[Dict[str, float]] = None,
+                metadata: Optional[Dict[str, Any]] = None):
         """
         Initialize generic experiment run.
 
@@ -230,12 +230,12 @@ class GenericExcelLoader(DataLoader):
     """
 
     def __init__(self,
-                 time_col: str,
-                 state_cols: List[str],
-                 control_cols: List[str],
-                 run_id_col: Optional[str] = None,
-                 sheet_name: Optional[Union[str, int]] = 0,
-                 preprocessing: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None):
+                time_col: str,
+                state_cols: List[str],
+                control_cols: List[str],
+                run_id_col: Optional[str] = None,
+                sheet_name: Optional[Union[str, int]] = 0,
+                preprocessing: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = None):
         """
         Initialize generic Excel loader.
 
@@ -255,8 +255,8 @@ class GenericExcelLoader(DataLoader):
         self.preprocessing = preprocessing
 
     def load(self, file_path: str,
-             run_ids: Optional[List[str]] = None,
-             max_runs: Optional[int] = None) -> GenericExcelDataset:
+           run_ids: Optional[List[str]] = None,
+           max_runs: Optional[int] = None) -> GenericExcelDataset:
         """
         Load data from Excel file.
 
@@ -334,8 +334,8 @@ class GenericExcelLoader(DataLoader):
 
 
 def load_multiple_excel_files(file_paths: List[str],
-                              loader: GenericExcelLoader,
-                              **kwargs) -> GenericExcelDataset:
+                            loader: GenericExcelLoader,
+                            **kwargs) -> GenericExcelDataset:
     """
     Load data from multiple Excel files.
 

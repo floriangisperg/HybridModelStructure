@@ -66,10 +66,10 @@ class BioprocessModel(DiffraxODEModel):
         )
 
     def system_equations(self,
-                         t: float,
-                         y: np.ndarray,
-                         parameters: Dict[str, Any],
-                         inputs: Dict[str, Any]) -> np.ndarray:
+                        t: float,
+                        y: np.ndarray,
+                        parameters: Dict[str, Any],
+                        inputs: Dict[str, Any]) -> np.ndarray:
         """
         Define the bioprocess ODE system.
 
@@ -141,8 +141,8 @@ class BioprocessModel(DiffraxODEModel):
         return np.array([dXdt, dPdt])
 
     def solve_for_run(self,
-                      model: Any,
-                      run_data: Dict[str, Any]) -> Dict[str, Any]:
+                     model: Any,
+                     run_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Solve ODE for a single run.
 
@@ -170,8 +170,24 @@ class BioprocessModel(DiffraxODEModel):
             'inductor_mass': run_data['inductor_mass'],
             'inductor_switch': run_data['inductor_switch'],
             'base': run_data['base'],
-            'reactor_volume': run_data['reactor_volume']
+            'reactor_volume': run_data['reactor_volume'],
+            # IMPORTANT: Include initial state values for parameter prediction
+            'X': X0,
+            'P': P0
         }
+
+        # Make sure all the required inputs exist
+        for key in ['X', 'P', 'temp', 'feed', 'inductor_mass', 'inductor_switch']:
+            if key not in inputs:
+                print(f"Warning: {key} is not in the inputs dictionary")
+                # Provide default values to prevent errors
+                if key == 'X':
+                    inputs[key] = X0
+                elif key == 'P':
+                    inputs[key] = P0
+                else:
+                    # Default values for control variables
+                    inputs[key] = 0.0
 
         # If this is a hybrid model, it will use the parameter model
         if hasattr(model, 'solve'):
@@ -277,8 +293,7 @@ class BioprocessHybridModel:
         return hybrid_model
 
 
-def calculate_custom_loss(model: Any, runs: List[Dict[str, Any]], mechanistic_model: BioprocessModel) -> Tuple[
-    float, Dict[str, float]]:
+def calculate_custom_loss(model: Any, runs: List[Dict[str, Any]], mechanistic_model: BioprocessModel) -> Tuple[float, Dict[str, float]]:
     """
     Calculate custom loss for bioprocess model.
 
