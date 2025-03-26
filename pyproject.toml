@@ -1,8 +1,9 @@
 [tool.poetry]
-name = "hybridmodelstructure"
+name = "hybrid-modeling"
 version = "0.1.0"
-description = ""
+description = "A flexible framework for hybrid mechanistic-neural network modeling"
 authors = ["Florian Gisperg <florian.gisperg@tuwien.ac.at>"]
+packages = [{include = "hybrid_modeling"}]
 readme = "README.md"
 
 [tool.poetry.dependencies]
@@ -18,6 +19,7 @@ optax = "^0.2.4"
 openpyxl = "^3.1.5"
 matplotlib = "3.9.0"
 black = "^25.1.0"
+notebook = "^7.3.3"
 
 
 [build-system]
