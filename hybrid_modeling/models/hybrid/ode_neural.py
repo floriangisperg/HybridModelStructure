@@ -10,10 +10,47 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import equinox as eqx
+from diffrax import ODETerm, Tsit5, SaveAt, PIDController, diffeqsolve
 
 from hybrid_modeling.core.hybrid import StandardHybridModel
 from hybrid_modeling.core.mechanistic import ODEModel
 from hybrid_modeling.core.parameters import ParameterModel
+
+
+def create_vector_field(mechanistic_model, parameter_model):
+    """
+    Create a JAX-compatible vector field function for Diffrax.
+
+    This function is designed to be compatible with JAX's tracing.
+
+    Args:
+        mechanistic_model: The ODE mechanistic model
+        parameter_model: The parameter model
+
+    Returns:
+        A vector field function
+    """
+    def vector_field(t, y, args):
+        # Get inputs from args
+        inputs = args.get('inputs', {}).copy()
+
+        # Update inputs with current state
+        state_names = getattr(mechanistic_model, 'state_names', ['X', 'P'])
+        for i, name in enumerate(state_names):
+            # Use JAX's type conversion
+            inputs[name] = jnp.asarray(y[i], dtype=float)
+
+        # Add time if not present
+        if 't' not in inputs:
+            inputs['t'] = jnp.asarray(t, dtype=float)
+
+        # Predict parameters using neural network
+        parameters = parameter_model.predict_parameters(inputs)
+
+        # Call mechanistic model's system equations
+        return mechanistic_model.system_equations(t, y, parameters, inputs)
+
+    return vector_field
 
 
 class ODENeuralHybridModel(StandardHybridModel):
@@ -35,47 +72,8 @@ class ODENeuralHybridModel(StandardHybridModel):
             parameter_model: Neural parameter model
         """
         super().__init__(ode_model, parameter_model)
-
-    def _custom_diffrax_system(self, t, y, args):
-        """
-        Custom ODE system for Diffrax with neural parameter prediction.
-
-        This method is called by Diffrax during ODE integration. It:
-        1. Takes the current state y and time t
-        2. Updates the inputs with these values
-        3. Predicts parameters using the neural network
-        4. Calls the mechanistic model's system equations
-
-        Args:
-            t: Time point
-            y: State vector
-            args: Arguments dictionary containing inputs and other data
-
-        Returns:
-            Derivatives of the state variables
-        """
-        # Get inputs from args
-        inputs = args.get('inputs', {}).copy()
-
-        # Update inputs with current state
-        state_names = getattr(self.mechanistic_model, 'state_names', ['X', 'P'])
-        for i, name in enumerate(state_names):
-            # Make sure we use a scalar value
-            inputs[name] = float(y[i])
-
-        # Add time if not present
-        if 't' not in inputs:
-            inputs['t'] = float(t)
-
-        # Predict parameters using neural network
-        try:
-            parameters = self.parameter_model.predict_parameters(inputs)
-        except Exception as e:
-            # Provide more helpful error message
-            raise ValueError(f"Error predicting parameters at t={t}, y={y}: {str(e)}")
-
-        # Call mechanistic model's system equations
-        return self.mechanistic_model.system_equations(t, y, parameters, inputs)
+        # Create the vector field function
+        self.vector_field_fn = create_vector_field(ode_model, parameter_model)
 
     def solve(self,
              initial_conditions: Dict[str, float],
@@ -100,23 +98,17 @@ class ODENeuralHybridModel(StandardHybridModel):
         # Get state names from mechanistic model
         state_names = getattr(self.mechanistic_model, 'state_names', ['X', 'P'])
 
-        # Create initial state vector
+        # Create initial state vector from numpy array
+        # Convert to numpy first to avoid JAX tracing issues
         y0 = np.array([initial_conditions.get(name, 0.0) for name in state_names])
 
-        # Time range
+        # Time range - convert to standard floats for safety
         t0 = float(time_points[0])
         t1 = float(time_points[-1])
 
         # Prepare Diffrax components
-        from diffrax import ODETerm, Tsit5, SaveAt, PIDController, diffeqsolve
-
-        # Prepare the system function
-        term = ODETerm(self._custom_diffrax_system)
-
-        # Choose solver
+        term = ODETerm(self.vector_field_fn)
         solver = solver_options.get('solver', Tsit5())
-
-        # Set up saving options
         saveat = SaveAt(ts=time_points)
 
         # Set up step size controller
@@ -124,33 +116,40 @@ class ODENeuralHybridModel(StandardHybridModel):
         atol = solver_options.get('atol', 1e-6)
         stepsize_controller = PIDController(rtol=rtol, atol=atol)
 
-        # Solve the ODE
-        args = {'inputs': inputs}
-
         try:
+            # Convert initial conditions to jnp array right before solving
+            jax_y0 = jnp.array(y0)
+
+            # Solve the ODE
             sol = diffeqsolve(
                 term,
                 solver,
                 t0=t0,
                 t1=t1,
                 dt0=solver_options.get('dt0', 0.01),
-                y0=y0,
-                args=args,
+                y0=jax_y0,
+                args={'inputs': inputs},
                 saveat=saveat,
                 max_steps=solver_options.get('max_steps', 50000),
                 stepsize_controller=stepsize_controller
             )
 
-            # Format the solution
+            # Convert solution to dictionary
             solution = {}
             for i, name in enumerate(state_names):
-                solution[name] = sol.ys[:, i]
+                # Convert to numpy array for consistency
+                solution[name] = np.array(sol.ys[:, i])
 
             return solution
 
         except Exception as e:
-            # Provide a more helpful error message
-            raise ValueError(f"Error solving ODE system: {str(e)}")
+            # Provide more helpful error information
+            error_msg = f"Error solving ODE system: {str(e)}"
+            if "ConcretizationTypeError" in str(e):
+                error_msg += ("\nThis is likely due to a JAX tracing error. "
+                             "Make sure all operations in your vector field "
+                             "function are JAX-compatible.")
+            raise ValueError(error_msg)
 
     def forward(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
