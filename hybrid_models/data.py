@@ -4,29 +4,29 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any, Set
 
 
 class TimeSeriesDataLoader:
     """
-    Generic loader for time series data suitable.
+    Generic loader for time series data suitable for hybrid modeling with standardized nomenclature.
 
-    Uses standard process modeling nomenclature:
-    - Z variables: Independent variables constant throughout the run (process conditions)
-    - X variables: Observed uncontrolled/dependent variables (process states)
+    Nomenclature:
+    - X variables: Observed uncontrolled (dependent) variables (process state/response)
     - W variables: Controlled independent variables
-    - F variables: Subset of W variables representing flows or feeds
-    - Y variables: Variables typically measured once near the end (e.g., quality attributes)
+    - F variables: A subset of W that are flows/feeds affecting mass balance
+    - Z variables: Independent variables expressing process conditions constant throughout a run
+    - Y variables: Variables typically measured only once near the end of the experiment (e.g., CQAs)
     """
 
     def __init__(
             self,
             time_column: str,
-            x_columns: List[str],  # Process states (previously state_columns)
-            w_columns: Optional[List[str]] = None,  # Controlled variables
-            f_columns: Optional[List[str]] = None,  # Flow/feed variables
-            z_columns: Optional[List[str]] = None,  # Constant process conditions
-            y_columns: Optional[List[str]] = None,  # End-of-run measurements
+            x_variables: List[str],
+            w_variables: Optional[List[str]] = None,
+            f_variables: Optional[List[str]] = None,
+            z_variables: Optional[List[str]] = None,
+            y_variables: Optional[List[str]] = None,
             run_id_column: Optional[str] = None
     ):
         """
@@ -34,20 +34,26 @@ class TimeSeriesDataLoader:
 
         Args:
             time_column: Name of the column containing time values
-            x_columns: Names of columns containing process state variables
-            w_columns: Names of columns containing controlled variables
-            f_columns: Names of columns containing flow/feed variables
-            z_columns: Names of columns containing constant process conditions
-            y_columns: Names of columns containing end-of-run measurements
+            x_variables: Names of columns containing observed state variables
+            w_variables: Names of columns containing controlled variables
+            f_variables: Names of columns containing flow/feed variables (subset of w_variables)
+            z_variables: Names of columns containing constant process conditions
+            y_variables: Names of columns containing end-of-run measurements
             run_id_column: Name of the column containing run/experiment identifiers
         """
         self.time_column = time_column
-        self.x_columns = x_columns
-        self.w_columns = w_columns or []
-        self.f_columns = f_columns or []
-        self.z_columns = z_columns or []
-        self.y_columns = y_columns or []
+        self.x_variables = x_variables
+        self.w_variables = w_variables or []
+        self.f_variables = f_variables or []
+        self.z_variables = z_variables or []
+        self.y_variables = y_variables or []
         self.run_id_column = run_id_column
+
+        # Ensure f_variables are a subset of w_variables
+        if not set(self.f_variables).issubset(set(self.w_variables)) and self.f_variables:
+            # Add any f_variables not in w_variables to w_variables
+            missing_w = set(self.f_variables) - set(self.w_variables)
+            self.w_variables.extend(list(missing_w))
 
     def load_from_excel(
             self,
@@ -171,309 +177,217 @@ class TimeSeriesDataLoader:
         # Extract time values
         times = jnp.array(run_data[self.time_column].values)
 
-        # Process X variables (process states)
-        x_vars = {}
-        for col in self.x_columns:
+        # Extract X variables (observed state variables)
+        x_states = {}
+        for col in self.x_variables:
             if col in run_data.columns:
-                # Extract data, handling NaN values
+                # Extract the state data, handling NaN values if present
                 state_data = run_data[[self.time_column, col]].dropna(subset=[col])
                 state_times = jnp.array(state_data[self.time_column].values)
                 state_values = jnp.array(state_data[col].values)
 
-                x_vars[col] = {
+                x_states[col] = {
                     'times': state_times,
                     'values': state_values
                 }
 
-        # Process W variables (controlled variables)
-        w_vars = {}
-        for col in self.w_columns:
+        # Extract W variables (controlled variables)
+        w_controls = {}
+        for col in self.w_variables:
             if col in run_data.columns:
-                # Handle NaN values by forward-filling
+                # Handle NaN values in controls by forward-filling
                 control_data = run_data[[self.time_column, col]].copy()
                 control_data[col] = control_data[col].ffill()
 
                 control_times = jnp.array(control_data[self.time_column].values)
                 control_values = jnp.array(control_data[col].values)
 
-                w_vars[col] = {
+                w_controls[col] = {
                     'times': control_times,
                     'values': control_values
                 }
 
-        # Process F variables (flow/feed variables, subset of W)
-        f_vars = {}
-        for col in self.f_columns:
+        # Extract F variables (feed/flow variables - subset of W)
+        f_variables = {}
+        for col in self.f_variables:
+            if col in w_controls:
+                f_variables[col] = w_controls[col]
+
+        # Extract Z variables (constant process conditions)
+        z_conditions = {}
+        for col in self.z_variables:
             if col in run_data.columns:
-                # Handle NaN values by forward-filling
-                feed_data = run_data[[self.time_column, col]].copy()
-                feed_data[col] = feed_data[col].ffill()
+                # Take the first non-NaN value as the constant condition
+                value = run_data[col].dropna().iloc[0] if not run_data[col].dropna().empty else None
+                if value is not None:
+                    z_conditions[col] = float(value)
 
-                feed_times = jnp.array(feed_data[self.time_column].values)
-                feed_values = jnp.array(feed_data[col].values)
-
-                f_vars[col] = {
-                    'times': feed_times,
-                    'values': feed_values
-                }
-
-        # Process Z variables (constant process conditions)
-        z_vars = {}
-        for col in self.z_columns:
+        # Extract Y variables (end-of-run measurements)
+        y_measurements = {}
+        for col in self.y_variables:
             if col in run_data.columns:
-                # For Z variables, we expect a constant value, but take the first non-NaN value to be safe
-                z_value = run_data[col].dropna().iloc[0] if not run_data[col].dropna().empty else None
-                if z_value is not None:
-                    z_vars[col] = float(z_value)
-
-        # Process Y variables (end-of-run measurements)
-        y_vars = {}
-        for col in self.y_columns:
-            if col in run_data.columns:
-                # For Y variables, we expect a measurement at the end of the run
-                # Take the last non-NaN value
-                y_value = run_data[col].dropna().iloc[-1] if not run_data[col].dropna().empty else None
-                if y_value is not None:
-                    y_vars[col] = float(y_value)
+                # Take the last non-NaN value as the end measurement
+                value = run_data[col].dropna().iloc[-1] if not run_data[col].dropna().empty else None
+                if value is not None:
+                    y_measurements[col] = float(value)
 
         # Create processed run data
         processed_run = {
             'run_id': run_id,
             'times': times,
-            'X': x_vars,  # Process states
-            'W': w_vars,  # Controlled variables
-            'F': f_vars,  # Flow/feed variables
-            'Z': z_vars,  # Constant process conditions
-            'Y': y_vars  # End-of-run measurements
+            'X': x_states,  # Observed state variables
+            'W': w_controls,  # Controlled variables
+            'F': f_variables,  # Flow/feed variables (subset of W)
+            'Z': z_conditions,  # Constant process conditions
+            'Y': y_measurements  # End-of-run measurements
         }
 
         return processed_run
 
+    def calculate_normalization_params(self, runs: List[Dict]) -> Dict[str, Dict[str, float]]:
+        """
+        Calculate normalization parameters from a list of runs.
 
-# Add to hybrid_models/data.py
+        Args:
+            runs: List of processed run dictionaries
 
-def calculate_normalization_params(runs: List[Dict], variables: Dict[str, List[str]] = None) -> Dict[str, float]:
-    """
-    Calculate normalization parameters (mean, std) for specified variables across all runs.
-
-    Args:
-        runs: List of run dictionaries from TimeSeriesDataLoader
-        variables: Dictionary mapping variable types ('X', 'W', 'F') to lists of variable names
-                   If None, calculates for all variables in the runs
-
-    Returns:
-        Dictionary of normalization parameters (var_mean, var_std for each variable)
-    """
-    norm_params = {}
-
-    # Default to process all variables if none specified
-    if variables is None:
-        variables = {
-            'X': [],
-            'W': [],
-            'F': []
+        Returns:
+            Dictionary of normalization parameters
+        """
+        norm_params = {
+            'X': {},
+            'W': {},
+            'F': {},
+            'Z': {},
+            'Y': {}
         }
 
-        # Collect all variable names from the first run
-        if runs:
-            for var_type in ['X', 'W', 'F']:
-                if var_type in runs[0]:
-                    variables[var_type] = list(runs[0][var_type].keys())
+        # Collect all values for each variable type
+        all_values = {
+            'X': {col: [] for col in self.x_variables},
+            'W': {col: [] for col in self.w_variables},
+            'F': {col: [] for col in self.f_variables},
+            'Z': {col: [] for col in self.z_variables},
+            'Y': {col: [] for col in self.y_variables}
+        }
 
-    # Process each variable type
-    for var_type, var_names in variables.items():
-        for var_name in var_names:
-            # Collect all values for this variable across runs
-            all_values = []
+        # Collect values from all runs
+        for run in runs:
+            # X variables
+            for col in self.x_variables:
+                if col in run['X']:
+                    all_values['X'][col].extend(run['X'][col]['values'])
 
-            for run in runs:
-                if var_type in run and var_name in run[var_type]:
-                    all_values.append(run[var_type][var_name]['values'])
+            # W variables
+            for col in self.w_variables:
+                if col in run['W']:
+                    all_values['W'][col].extend(run['W'][col]['values'])
 
-            if all_values:
-                # Concatenate all values and calculate statistics
-                all_values_array = jnp.concatenate(all_values)
-                mean_val = float(jnp.mean(all_values_array))
-                std_val = float(jnp.std(all_values_array))
+            # F variables (already a subset of W, but kept separate for clarity)
+            for col in self.f_variables:
+                if col in run['F']:
+                    all_values['F'][col].extend(run['F'][col]['values'])
 
-                # Store normalization parameters
-                norm_params[f"{var_name}_mean"] = mean_val
-                norm_params[f"{var_name}_std"] = max(std_val, 1e-8)  # Avoid division by zero
+            # Z variables
+            for col in self.z_variables:
+                if col in run['Z']:
+                    all_values['Z'][col].append(run['Z'][col])
 
-    return norm_params
+            # Y variables
+            for col in self.y_variables:
+                if col in run['Y']:
+                    all_values['Y'][col].append(run['Y'][col])
 
+        # Calculate mean and std for each variable
+        for var_type in ['X', 'W', 'F', 'Z', 'Y']:
+            for col, values in all_values[var_type].items():
+                if values:
+                    values_array = jnp.array(values)
+                    norm_params[var_type][col] = {
+                        'mean': float(jnp.mean(values_array)),
+                        'std': float(jnp.std(values_array)) or 1.0  # Use 1.0 if std is 0
+                    }
 
-class DatasetPreparer:
-    """
-    Prepares datasets for ODE model training and evaluation from structured run data.
-    """
+        return norm_params
 
-    def __init__(self, norm_params: Dict[str, float] = None):
+    def apply_normalization(self, runs: List[Dict], norm_params: Dict) -> List[Dict]:
         """
-        Initialize the dataset preparer.
+        Apply normalization to a list of runs.
 
         Args:
-            norm_params: Optional normalization parameters to use
-        """
-        self.norm_params = norm_params
-
-    def prepare_ode_datasets(
-            self,
-            runs: List[Dict],
-            state_names: List[str],
-            input_names: Dict[str, List[str]] = None,
-            calculate_derivatives: bool = True
-    ) -> List[Dict]:
-        """
-        Prepare datasets for ODE model training from structured run data.
-
-        Args:
-            runs: List of run dictionaries from TimeSeriesDataLoader
-            state_names: Names of state variables to include in the dataset
-            input_names: Dictionary mapping input types ('W', 'F', 'Z') to lists of input names
-                         If None, includes all available inputs
-            calculate_derivatives: Whether to calculate derivatives for inputs (e.g., feed rates)
+            runs: List of processed run dictionaries
+            norm_params: Dictionary of normalization parameters
 
         Returns:
-            List of datasets ready for ODE training
+            List of normalized run dictionaries
         """
-        datasets = []
-
-        # Default input configuration if none provided
-        if input_names is None:
-            input_names = {
-                'W': [],
-                'F': [],
-                'Z': []
-            }
-
-            # Collect all input names from the first run
-            if runs:
-                for input_type in ['W', 'F', 'Z']:
-                    if input_type in runs[0]:
-                        if input_type == 'Z':
-                            input_names[input_type] = list(runs[0][input_type].keys())
-                        else:
-                            input_names[input_type] = list(runs[0][input_type].keys())
+        normalized_runs = []
 
         for run in runs:
-            # Create initial state dictionary
-            initial_state = {}
-            for state_name in state_names:
-                if state_name in run['X']:
-                    initial_state[state_name] = float(run['X'][state_name]['values'][0])
-                else:
-                    raise ValueError(f"State variable '{state_name}' not found in run data")
-
-            # Find common evaluation times (from the first state variable)
-            ref_state = run['X'][state_names[0]]
-            eval_times = ref_state['times']
-
-            # Create dictionary for time-dependent inputs
-            time_dependent_inputs = {}
-
-            # Process W variables (controlled variables)
-            for var_name in input_names.get('W', []):
-                if var_name in run['W']:
-                    var_data = run['W'][var_name]
-                    time_dependent_inputs[var_name] = (var_data['times'], var_data['values'])
-
-            # Process F variables (flow/feed variables)
-            for var_name in input_names.get('F', []):
-                if var_name in run['F']:
-                    var_data = run['F'][var_name]
-                    time_dependent_inputs[var_name] = (var_data['times'], var_data['values'])
-
-                    # Calculate derivatives (rates) if requested
-                    if calculate_derivatives:
-                        var_rate_name = f"{var_name}_rate"
-                        var_rate = calculate_rate(var_data['times'], var_data['values'])
-                        time_dependent_inputs[var_rate_name] = (var_data['times'], var_rate)
-
-            # Create static inputs dictionary for Z variables
-            static_inputs = {}
-            for var_name in input_names.get('Z', []):
-                if var_name in run['Z']:
-                    static_inputs[var_name] = run['Z'][var_name]
-
-            # Create dataset dictionary
-            dataset = {
-                'initial_state': initial_state,
-                'times': eval_times,
-                'time_dependent_inputs': time_dependent_inputs,
-                'static_inputs': static_inputs
+            normalized_run = {
+                'run_id': run['run_id'],
+                'times': run['times'],
+                'X': {},
+                'W': {},
+                'F': {},
+                'Z': {},
+                'Y': {}
             }
 
-            # Add true state values for loss calculation
-            for state_name in state_names:
-                if state_name in run['X']:
-                    dataset[f'{state_name}_true'] = run['X'][state_name]['values']
-
-            datasets.append(dataset)
-
-        return datasets
-
-    def normalize_dataset(self, dataset: Dict) -> Dict:
-        """
-        Normalize a dataset using stored normalization parameters.
-
-        Args:
-            dataset: Dataset dictionary to normalize
-
-        Returns:
-            Normalized dataset
-        """
-        if self.norm_params is None:
-            return dataset  # Return unchanged if no normalization parameters
-
-        normalized = dataset.copy()
-
-        # Normalize initial state
-        if 'initial_state' in normalized:
-            normalized_initial_state = {}
-            for state, value in normalized['initial_state'].items():
-                mean_key = f"{state}_mean"
-                std_key = f"{state}_std"
-                if mean_key in self.norm_params and std_key in self.norm_params:
-                    normalized_value = (value - self.norm_params[mean_key]) / self.norm_params[std_key]
-                    normalized_initial_state[state] = normalized_value
+            # Normalize X variables
+            for col, data in run['X'].items():
+                if col in norm_params['X']:
+                    normalized_values = (data['values'] - norm_params['X'][col]['mean']) / norm_params['X'][col]['std']
+                    normalized_run['X'][col] = {
+                        'times': data['times'],
+                        'values': normalized_values,
+                        'original_values': data['values']
+                    }
                 else:
-                    normalized_initial_state[state] = value
-            normalized['initial_state'] = normalized_initial_state
+                    normalized_run['X'][col] = data
 
-        # Normalize time-dependent inputs
-        if 'time_dependent_inputs' in normalized:
-            normalized_time_inputs = {}
-            for var, (times, values) in normalized['time_dependent_inputs'].items():
-                mean_key = f"{var}_mean"
-                std_key = f"{var}_std"
-                if mean_key in self.norm_params and std_key in self.norm_params:
-                    normalized_values = (values - self.norm_params[mean_key]) / self.norm_params[std_key]
-                    normalized_time_inputs[var] = (times, normalized_values)
+            # Normalize W variables
+            for col, data in run['W'].items():
+                if col in norm_params['W']:
+                    normalized_values = (data['values'] - norm_params['W'][col]['mean']) / norm_params['W'][col]['std']
+                    normalized_run['W'][col] = {
+                        'times': data['times'],
+                        'values': normalized_values,
+                        'original_values': data['values']
+                    }
                 else:
-                    normalized_time_inputs[var] = (times, values)
-            normalized['time_dependent_inputs'] = normalized_time_inputs
+                    normalized_run['W'][col] = data
 
-        # Normalize static inputs
-        if 'static_inputs' in normalized:
-            normalized_static_inputs = {}
-            for var, value in normalized['static_inputs'].items():
-                mean_key = f"{var}_mean"
-                std_key = f"{var}_std"
-                if mean_key in self.norm_params and std_key in self.norm_params:
-                    normalized_value = (value - self.norm_params[mean_key]) / self.norm_params[std_key]
-                    normalized_static_inputs[var] = normalized_value
+            # Normalize F variables
+            for col, data in run['F'].items():
+                if col in norm_params['F']:
+                    normalized_values = (data['values'] - norm_params['F'][col]['mean']) / norm_params['F'][col]['std']
+                    normalized_run['F'][col] = {
+                        'times': data['times'],
+                        'values': normalized_values,
+                        'original_values': data['values']
+                    }
                 else:
-                    normalized_static_inputs[var] = value
-            normalized['static_inputs'] = normalized_static_inputs
+                    normalized_run['F'][col] = data
 
-        # Normalize true state values (used for loss calculation)
-        for key in normalized:
-            if key.endswith('_true'):
-                state = key[:-5]  # Remove '_true'
-                mean_key = f"{state}_mean"
-                std_key = f"{state}_std"
-                if mean_key in self.norm_params and std_key in self.norm_params:
-                    normalized[key] = (normalized[key] - self.norm_params[mean_key]) / self.norm_params[std_key]
+            # Normalize Z variables
+            for col, value in run['Z'].items():
+                if col in norm_params['Z']:
+                    normalized_value = (value - norm_params['Z'][col]['mean']) / norm_params['Z'][col]['std']
+                    normalized_run['Z'][col] = normalized_value
+                    normalized_run['Z'][f'{col}_original'] = value
+                else:
+                    normalized_run['Z'][col] = value
 
-        return normalized
+            # Normalize Y variables
+            for col, value in run['Y'].items():
+                if col in norm_params['Y']:
+                    normalized_value = (value - norm_params['Y'][col]['mean']) / norm_params['Y'][col]['std']
+                    normalized_run['Y'][col] = normalized_value
+                    normalized_run['Y'][f'{col}_original'] = value
+                else:
+                    normalized_run['Y'][col] = value
+
+            normalized_runs.append(normalized_run)
+
+        return normalized_runs

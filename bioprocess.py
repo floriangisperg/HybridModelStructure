@@ -8,19 +8,18 @@ from typing import Dict, List, Tuple
 import os
 from jaxtyping import Array, Float
 
-# Import our framework (assuming it's installed or in the same directory)
+# Import our framework
 from hybrid_models import (
     HybridModelBuilder,
     train_hybrid_model,
     evaluate_hybrid_model,
-    calculate_metrics,  # Import the function directly
-    normalize_data,
+    calculate_metrics,
     calculate_rate,
-    create_initial_random_key,
-    TimeSeriesDataLoader,
-    calculate_normalization_params,
-    DatasetPreparer
+    create_initial_random_key
 )
+
+# Import our new data loader
+from hybrid_models.data import TimeSeriesDataLoader
 
 
 # =============================================
@@ -28,85 +27,83 @@ from hybrid_models import (
 # =============================================
 
 def load_bioprocess_data(file_path, run_ids=None, max_runs=5):
-    """Load bioprocess experimental data using TimeSeriesDataLoader."""
-    # Create a loader instance with appropriate column mapping
+    """Load bioprocess experimental data using the new TimeSeriesDataLoader."""
+    # Create a data loader with appropriate column specifications
     loader = TimeSeriesDataLoader(
         time_column='feedtimer(h)',
-        x_columns=['CDW(g/L)', 'Produktsol(g/L)'],  # Process states (X)
-        w_columns=['Temp(°C)', 'Inductor(yesno)', 'Reaktorvolumen(L)'],  # Controlled variables (W)
-        f_columns=['Feed(L)', 'Base(L)'],  # Flow variables (F)
-        z_columns=['InductorMASS(mg)'],  # Process conditions (Z)
+        x_variables=['CDW(g/L)', 'Produktsol(g/L)'],  # State variables
+        w_variables=['Temp(°C)', 'InductorMASS(mg)', 'Inductor(yesno)', 'Reaktorvolumen(L)'],  # Controlled variables
+        f_variables=['Feed(L)', 'Base(L)'],  # Flow variables
+        z_variables=[],  # No constant process conditions in this dataset
+        y_variables=[],  # No end-of-run measurements in this dataset
         run_id_column='RunID'
     )
 
-    # Load data
-    runs = loader.load_from_excel(file_path, run_ids=run_ids, max_runs=max_runs)
+    # Load data from Excel file
+    runs_data = loader.load_from_excel(file_path, run_ids=run_ids, max_runs=max_runs)
 
-    # For compatibility with the existing code, add a processed inductor_switch variable
-    for run in runs:
-        if 'Inductor(yesno)' in run['W']:
-            # Convert boolean/text to binary (0/1)
-            inductor_values = run['W']['Inductor(yesno)']['values']
-            inductor_times = run['W']['Inductor(yesno)']['times']
+    # Calculate normalization parameters
+    norm_params = loader.calculate_normalization_params(runs_data)
 
-            # Create a boolean array and convert to float (0.0 or 1.0)
-            inductor_switch = jnp.array([1.0 if val else 0.0 for val in inductor_values])
+    # Convert to the format expected by the rest of the code
+    runs = []
+    for run_data in runs_data:
+        # Extract run_id
+        run_id = run_data['run_id']
 
-            # Add as a new controlled variable
-            run['W']['inductor_switch'] = {
-                'times': inductor_times,
-                'values': inductor_switch
+        # Extract state variables (X)
+        X = run_data['X']['CDW(g/L)']['values'] if 'CDW(g/L)' in run_data['X'] else jnp.array([])
+        P = run_data['X']['Produktsol(g/L)']['values'] if 'Produktsol(g/L)' in run_data['X'] else jnp.array([])
+        states_times = run_data['X']['CDW(g/L)']['times'] if 'CDW(g/L)' in run_data['X'] else run_data['times']
+
+        # Extract control variables (W and F)
+        controls_times = run_data['times']
+
+        # Extract individual control inputs
+        temp = run_data['W']['Temp(°C)']['values'] if 'Temp(°C)' in run_data['W'] else jnp.zeros_like(controls_times)
+        feed = run_data['F']['Feed(L)']['values'] if 'Feed(L)' in run_data['F'] else jnp.zeros_like(controls_times)
+        inductor_mass = run_data['W']['InductorMASS(mg)']['values'] if 'InductorMASS(mg)' in run_data[
+            'W'] else jnp.zeros_like(controls_times)
+        inductor_switch = run_data['W']['Inductor(yesno)']['values'] if 'Inductor(yesno)' in run_data[
+            'W'] else jnp.zeros_like(controls_times)
+        base = run_data['F']['Base(L)']['values'] if 'Base(L)' in run_data['F'] else jnp.zeros_like(controls_times)
+        reactor_volume = run_data['W']['Reaktorvolumen(L)']['values'] if 'Reaktorvolumen(L)' in run_data[
+            'W'] else jnp.zeros_like(controls_times)
+
+        # Create a run dict in the original format
+        run = {
+            'run_id': run_id,
+            'states_times': states_times,
+            'X': X,
+            'P': P,
+            'controls_times': controls_times,
+            'temp': temp,
+            'feed': feed,
+            'inductor_mass': inductor_mass,
+            'inductor_switch': inductor_switch,
+            'base': base,
+            'reactor_volume': reactor_volume,
+            'norm_params': {
+                'X_mean': norm_params['X'].get('CDW(g/L)', {}).get('mean', 0.0),
+                'X_std': norm_params['X'].get('CDW(g/L)', {}).get('std', 1.0),
+                'P_mean': norm_params['X'].get('Produktsol(g/L)', {}).get('mean', 0.0),
+                'P_std': norm_params['X'].get('Produktsol(g/L)', {}).get('std', 1.0),
+                'temp_mean': norm_params['W'].get('Temp(°C)', {}).get('mean', 0.0),
+                'temp_std': norm_params['W'].get('Temp(°C)', {}).get('std', 1.0),
+                'feed_mean': norm_params['F'].get('Feed(L)', {}).get('mean', 0.0),
+                'feed_std': norm_params['F'].get('Feed(L)', {}).get('std', 1.0),
+                'inductor_mass_mean': norm_params['W'].get('InductorMASS(mg)', {}).get('mean', 0.0),
+                'inductor_mass_std': norm_params['W'].get('InductorMASS(mg)', {}).get('std', 1.0),
+                'base_mean': norm_params['F'].get('Base(L)', {}).get('mean', 0.0),
+                'base_std': norm_params['F'].get('Base(L)', {}).get('std', 1.0),
+                'reactor_volume_mean': norm_params['W'].get('Reaktorvolumen(L)', {}).get('mean', 0.0),
+                'reactor_volume_std': norm_params['W'].get('Reaktorvolumen(L)', {}).get('std', 1.0),
             }
+        }
 
-    # Calculate normalization parameters for all variables
-    norm_params = calculate_normalization_params(runs)
-
-    # Add normalization parameters to each run
-    for run in runs:
-        run['norm_params'] = norm_params
+        runs.append(run)
 
     return runs
-
-
-# =============================================
-# PREPARE DATASET FOR TRAINING
-# =============================================
-
-def prepare_bioprocess_dataset(runs):
-    """Prepare datasets for training using the DatasetPreparer."""
-    # Get normalization parameters from the first run
-    norm_params = runs[0]['norm_params']
-
-    # Create dataset preparer with normalization parameters
-    preparer = DatasetPreparer(norm_params)
-
-    # Prepare datasets for ODE training
-    datasets = preparer.prepare_ode_datasets(
-        runs=runs,
-        state_names=['CDW(g/L)', 'Produktsol(g/L)'],  # State variables
-        input_names={
-            'W': ['Temp(°C)', 'inductor_switch', 'Reaktorvolumen(L)'],
-            'F': ['Feed(L)', 'Base(L)'],
-            'Z': ['InductorMASS(mg)']
-        },
-        calculate_derivatives=True  # Calculate feed and base rates
-    )
-
-    # Rename state variables to match the ODE model (X for biomass, P for product)
-    for dataset in datasets:
-        # Rename initial state keys
-        if 'CDW(g/L)' in dataset['initial_state']:
-            dataset['initial_state']['X'] = dataset['initial_state'].pop('CDW(g/L)')
-        if 'Produktsol(g/L)' in dataset['initial_state']:
-            dataset['initial_state']['P'] = dataset['initial_state'].pop('Produktsol(g/L)')
-
-        # Rename true value keys
-        if 'CDW(g/L)_true' in dataset:
-            dataset['X_true'] = dataset.pop('CDW(g/L)_true')
-        if 'Produktsol(g/L)_true' in dataset:
-            dataset['P_true'] = dataset.pop('Produktsol(g/L)_true')
-
-    return datasets
 
 
 # =============================================
@@ -129,9 +126,9 @@ def define_bioprocess_model(norm_params):
     # Define dilution rate calculation
     def calculate_dilution_rate(inputs):
         """Calculate dilution rate from feed and base rates."""
-        volume = inputs.get('Reaktorvolumen(L)', 1.0)
-        feed_rate = inputs.get('Feed(L)_rate', 0.0)
-        base_rate = inputs.get('Base(L)_rate', 0.0)
+        volume = inputs.get('reactor_volume', 1.0)
+        feed_rate = inputs.get('feed_rate', 0.0)
+        base_rate = inputs.get('base_rate', 0.0)
 
         # Calculate total flow rate
         total_flow_rate = feed_rate + base_rate
@@ -182,7 +179,7 @@ def define_bioprocess_model(norm_params):
     # Replace growth rate with neural network
     builder.replace_with_nn(
         name='growth_rate',
-        input_features=['X', 'P', 'Temp(°C)', 'Feed(L)', 'InductorMASS(mg)', 'inductor_switch'],
+        input_features=['X', 'P', 'temp', 'feed', 'inductor_mass', 'inductor_switch'],
         hidden_dims=[8, 8],  # Smaller network
         key=key1
     )
@@ -190,7 +187,7 @@ def define_bioprocess_model(norm_params):
     # Replace product formation rate with neural network
     builder.replace_with_nn(
         name='product_rate',
-        input_features=['X', 'P', 'Temp(°C)', 'Feed(L)', 'InductorMASS(mg)', 'inductor_switch'],
+        input_features=['X', 'P', 'temp', 'feed', 'inductor_mass', 'inductor_switch'],
         hidden_dims=[8, 8],  # Smaller network
         output_activation=jax.nn.softplus,  # Ensure non-negative rate
         key=key2
@@ -198,6 +195,44 @@ def define_bioprocess_model(norm_params):
 
     # Build and return the model
     return builder.build()
+
+
+# =============================================
+# PREPARE DATASET FOR TRAINING
+# =============================================
+
+def prepare_bioprocess_dataset(runs):
+    """Prepare datasets for training."""
+    datasets = []
+
+    for run in runs:
+        # Calculate feed and base rates
+        feed_rate = calculate_rate(run['controls_times'], run['feed'])
+        base_rate = calculate_rate(run['controls_times'], run['base'])
+
+        # Create dataset for this run
+        dataset = {
+            'X_true': run['X'],
+            'P_true': run['P'],
+            'times': run['states_times'],
+            'initial_state': {
+                'X': run['X'][0],
+                'P': run['P'][0]
+            },
+            'time_dependent_inputs': {
+                'temp': (run['controls_times'], run['temp']),
+                'feed': (run['controls_times'], run['feed']),
+                'inductor_mass': (run['controls_times'], run['inductor_mass']),
+                'inductor_switch': (run['controls_times'], run['inductor_switch']),
+                'reactor_volume': (run['controls_times'], run['reactor_volume']),
+                'feed_rate': (run['controls_times'], feed_rate),
+                'base_rate': (run['controls_times'], base_rate)
+            }
+        }
+
+        datasets.append(dataset)
+
+    return datasets
 
 
 # =============================================
@@ -217,8 +252,7 @@ def bioprocess_loss_function(model, datasets):
             t_span=(dataset['times'][0], dataset['times'][-1]),
             evaluation_times=dataset['times'],
             args={
-                'time_dependent_inputs': dataset['time_dependent_inputs'],
-                'static_inputs': dataset.get('static_inputs', {})
+                'time_dependent_inputs': dataset['time_dependent_inputs']
             },
             max_steps=100000,
             rtol=1e-2,  # Slightly relaxed tolerance
@@ -240,8 +274,8 @@ def bioprocess_loss_function(model, datasets):
         total_x_loss += X_loss
         total_p_loss += P_loss
 
-    # Return average loss
-    n_datasets = len(datasets)
+        # Return average loss
+        n_datasets = len(datasets)
     return total_loss / n_datasets, (total_x_loss / n_datasets, total_p_loss / n_datasets)
 
 
@@ -256,8 +290,7 @@ def solve_for_dataset(model, dataset):
         t_span=(dataset['times'][0], dataset['times'][-1]),
         evaluation_times=dataset['times'],
         args={
-            'time_dependent_inputs': dataset['time_dependent_inputs'],
-            'static_inputs': dataset.get('static_inputs', {})
+            'time_dependent_inputs': dataset['time_dependent_inputs']
         },
         max_steps=100000,
         rtol=1e-2,  # Slightly relaxed tolerance
@@ -336,7 +369,7 @@ def plot_results(model, datasets, history, output_dir="results"):
 # =============================================
 
 def main():
-    # Load data using our new data loader
+    # Load data
     print("Loading data...")
     runs = load_bioprocess_data('Train_data.xlsx')
     print(f"Loaded {len(runs)} runs")
